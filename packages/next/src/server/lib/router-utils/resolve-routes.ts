@@ -267,7 +267,10 @@ export function getResolveRoutes(
         if (invokedOutputs?.has(route.page)) {
           continue
         }
-        const decodedURL = decodeURIComponent(localeResult.pathname)
+        let decodedURL = localeResult.pathname
+        try {
+          decodedURL = decodeURIComponent(localeResult.pathname)
+        } catch {}
         const params = route.match(decodedURL)
 
         if (params) {
