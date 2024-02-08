@@ -874,7 +874,8 @@ async function renderToHTMLOrFlightImpl(
         ComponentMod,
         clientReferenceManifest,
         serverComponentsErrorHandler,
-        serverComponentsPostponeHandler
+        serverComponentsPostponeHandler,
+        asNotFound
       )
 
       const renderInlinedDataTransformStream = new TransformStream<
@@ -1073,7 +1074,8 @@ async function renderToHTMLOrFlightImpl(
           ComponentMod,
           clientReferenceManifest,
           serverComponentsErrorHandler,
-          serverComponentsPostponeHandler
+          serverComponentsPostponeHandler,
+          asNotFound || is404
         )
 
         // Preserve the existing RSC inline chunks from the page rendering.

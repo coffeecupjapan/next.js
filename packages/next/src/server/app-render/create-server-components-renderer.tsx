@@ -11,13 +11,24 @@ export function createReactServerRenderer(
   ComponentMod: AppPageModule,
   clientReferenceManifest: NonNullable<RenderOpts['clientReferenceManifest']>,
   onError: ReturnType<typeof createErrorHandler>,
-  onPostpone: (reason: unknown) => void
+  onPostpone: (reason: unknown) => void,
+  isNotFound: boolean
 ): () => ReadableStream<Uint8Array> {
   let flightStream: ReadableStream<Uint8Array>
   return function renderToReactServerStream() {
     if (flightStream) {
       return flightStream
     } else {
+      // remove not-found component from bundle if page is not not-found
+      if (!isNotFound) {
+        ComponentMod.tree.forEach((treeElement) => {
+          if (typeof treeElement !== 'object') return
+          Object.keys(treeElement).forEach((treeKey) => {
+            // @ts-ignore
+            if (treeKey === 'not-found') delete treeElement['not-found']
+          })
+        })
+      }
       flightStream = ComponentMod.renderToReadableStream(
         children,
         clientReferenceManifest.clientModules,
