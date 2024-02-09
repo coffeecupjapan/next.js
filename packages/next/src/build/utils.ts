@@ -1580,7 +1580,13 @@ export async function isPageStatic({
       const routeModule: RouteModule =
         componentsResult.ComponentMod?.routeModule
 
+      let supportsPPR = false
+
       if (pageType === 'app') {
+        if (ppr && routeModule.definition.kind === RouteKind.APP_PAGE) {
+          supportsPPR = true
+        }
+
         const ComponentMod: AppPageModule = componentsResult.ComponentMod
 
         isClientComponent = isClientReference(componentsResult.ComponentMod)
@@ -1650,7 +1656,7 @@ export async function isPageStatic({
         // If force dynamic was set and we don't have PPR enabled, then set the
         // revalidate to 0.
         // TODO: (PPR) remove this once PPR is enabled by default
-        if (appConfig.dynamic === 'force-dynamic' && !ppr) {
+        if (appConfig.dynamic === 'force-dynamic' && !supportsPPR) {
           appConfig.revalidate = 0
         }
 
@@ -1748,7 +1754,7 @@ export async function isPageStatic({
       // When PPR is enabled, any route may be completely static, so
       // mark this route as static.
       let isPPR = false
-      if (ppr && routeModule.definition.kind === RouteKind.APP_PAGE) {
+      if (supportsPPR) {
         isPPR = true
         isStatic = true
       }
@@ -1782,12 +1788,17 @@ export async function isPageStatic({
     })
 }
 
-export async function hasCustomGetInitialProps(
-  page: string,
-  distDir: string,
-  runtimeEnvConfig: any,
+export async function hasCustomGetInitialProps({
+  page,
+  distDir,
+  runtimeEnvConfig,
+  checkingApp,
+}: {
+  page: string
+  distDir: string
+  runtimeEnvConfig: any
   checkingApp: boolean
-): Promise<boolean> {
+}): Promise<boolean> {
   require('../shared/lib/runtime-config.external').setConfig(runtimeEnvConfig)
 
   const components = await loadComponents({
@@ -1806,11 +1817,15 @@ export async function hasCustomGetInitialProps(
   return mod.getInitialProps !== mod.origGetInitialProps
 }
 
-export async function getDefinedNamedExports(
-  page: string,
-  distDir: string,
+export async function getDefinedNamedExports({
+  page,
+  distDir,
+  runtimeEnvConfig,
+}: {
+  page: string
+  distDir: string
   runtimeEnvConfig: any
-): Promise<ReadonlyArray<string>> {
+}): Promise<ReadonlyArray<string>> {
   require('../shared/lib/runtime-config.external').setConfig(runtimeEnvConfig)
   const components = await loadComponents({
     distDir,

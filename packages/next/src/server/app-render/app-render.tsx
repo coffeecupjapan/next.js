@@ -52,7 +52,11 @@ import { addImplicitTags } from '../lib/patch-fetch'
 import { AppRenderSpan } from '../lib/trace/constants'
 import { getTracer } from '../lib/trace/tracer'
 import { FlightRenderResult } from './flight-render-result'
-import { createErrorHandler, type ErrorHandler } from './create-error-handler'
+import {
+  createErrorHandler,
+  ErrorHandlerSource,
+  type ErrorHandler,
+} from './create-error-handler'
 import {
   getShortDynamicParamType,
   dynamicParamTypes,
@@ -80,6 +84,9 @@ import { DetachedPromise } from '../../lib/detached-promise'
 import { isDynamicServerError } from '../../client/components/hooks-server-context'
 import { useFlightResponse } from './use-flight-response'
 import { isStaticGenBailoutError } from '../../client/components/static-generation-bailout'
+import { isInterceptionRouteAppPath } from '../future/helpers/interception-routes'
+import { getStackWithoutErrorMessage } from '../../lib/format-server-error'
+import { isNavigationSignalError } from '../../export/helpers/is-navigation-signal-error'
 
 export type GetDynamicParamFromSegment = (
   // [slug] / [[slug]] / [...slug]
@@ -104,9 +111,7 @@ export type AppRenderContext = AppRenderBaseContext & {
   getDynamicParamFromSegment: GetDynamicParamFromSegment
   query: NextParsedUrlQuery
   isPrefetch: boolean
-  providedSearchParams: NextParsedUrlQuery
   requestTimestamp: number
-  searchParamsProps: { searchParams: NextParsedUrlQuery }
   appUsingSizeAdjustment: boolean
   providedFlightRouterState?: FlightRouterState
   requestId: string
@@ -250,11 +255,15 @@ async function generateFlight(
   let flightData: FlightData | null = null
 
   const {
-    componentMod: { tree: loaderTree, renderToReadableStream },
+    componentMod: {
+      tree: loaderTree,
+      renderToReadableStream,
+      createDynamicallyTrackedSearchParams,
+    },
     getDynamicParamFromSegment,
     appUsingSizeAdjustment,
     staticGenerationStore: { urlPathname },
-    providedSearchParams,
+    query,
     requestId,
     providedFlightRouterState,
   } = ctx
@@ -263,9 +272,10 @@ async function generateFlight(
     const [MetadataTree, MetadataOutlet] = createMetadataComponents({
       tree: loaderTree,
       pathname: urlPathname,
-      searchParams: providedSearchParams,
+      query,
       getDynamicParamFromSegment,
       appUsingSizeAdjustment,
+      createDynamicallyTrackedSearchParams,
     })
     flightData = (
       await walkTreeWithFlightRouterState({
@@ -374,9 +384,12 @@ async function ReactServerApp({
   const {
     getDynamicParamFromSegment,
     query,
-    providedSearchParams,
     appUsingSizeAdjustment,
-    componentMod: { AppRouter, GlobalError },
+    componentMod: {
+      AppRouter,
+      GlobalError,
+      createDynamicallyTrackedSearchParams,
+    },
     staticGenerationStore: { urlPathname },
   } = ctx
   const initialTree = createFlightRouterStateFromLoaderTree(
@@ -389,9 +402,10 @@ async function ReactServerApp({
     tree,
     errorType: asNotFound ? 'not-found' : undefined,
     pathname: urlPathname,
-    searchParams: providedSearchParams,
+    query,
     getDynamicParamFromSegment: getDynamicParamFromSegment,
     appUsingSizeAdjustment: appUsingSizeAdjustment,
+    createDynamicallyTrackedSearchParams,
   })
 
   const { seedData, styles } = await createComponentTree({
@@ -454,9 +468,12 @@ async function ReactServerError({
   const {
     getDynamicParamFromSegment,
     query,
-    providedSearchParams,
     appUsingSizeAdjustment,
-    componentMod: { AppRouter, GlobalError },
+    componentMod: {
+      AppRouter,
+      GlobalError,
+      createDynamicallyTrackedSearchParams,
+    },
     staticGenerationStore: { urlPathname },
     requestId,
     res,
@@ -467,9 +484,10 @@ async function ReactServerError({
     tree,
     pathname: urlPathname,
     errorType,
-    searchParams: providedSearchParams,
+    query,
     getDynamicParamFromSegment,
     appUsingSizeAdjustment,
+    createDynamicallyTrackedSearchParams,
   })
 
   const head = (
@@ -614,7 +632,7 @@ async function renderToHTMLOrFlightImpl(
     serverModuleMap,
   })
 
-  const capturedErrors: Error[] = []
+  const digestErrorsMap: Map<string, Error> = new Map()
   const allCapturedErrors: Error[] = []
   const isNextExport = !!renderOpts.nextExport
   const { staticGenerationStore, requestStore } = baseCtx
@@ -625,27 +643,27 @@ async function renderToHTMLOrFlightImpl(
     renderOpts.experimental.ppr && isStaticGeneration
 
   const serverComponentsErrorHandler = createErrorHandler({
-    _source: 'serverComponentsRenderer',
+    source: ErrorHandlerSource.serverComponents,
     dev,
     isNextExport,
     errorLogger: appDirDevErrorLogger,
-    capturedErrors,
+    digestErrorsMap,
     silenceLogger: silenceStaticGenerationErrors,
   })
   const flightDataRendererErrorHandler = createErrorHandler({
-    _source: 'flightDataRenderer',
+    source: ErrorHandlerSource.flightData,
     dev,
     isNextExport,
     errorLogger: appDirDevErrorLogger,
-    capturedErrors,
+    digestErrorsMap,
     silenceLogger: silenceStaticGenerationErrors,
   })
   const htmlRendererErrorHandler = createErrorHandler({
-    _source: 'htmlRenderer',
+    source: ErrorHandlerSource.html,
     dev,
     isNextExport,
     errorLogger: appDirDevErrorLogger,
-    capturedErrors,
+    digestErrorsMap,
     allCapturedErrors,
     silenceLogger: silenceStaticGenerationErrors,
   })
@@ -683,11 +701,7 @@ async function renderToHTMLOrFlightImpl(
   const generateStaticHTML = supportsDynamicHTML !== true
 
   // Pull out the hooks/references from the component.
-  const {
-    createSearchParamsBailoutProxy,
-    tree: loaderTree,
-    taintObjectReference,
-  } = ComponentMod
+  const { tree: loaderTree, taintObjectReference } = ComponentMod
 
   if (enableTainting) {
     taintObjectReference(
@@ -712,14 +726,25 @@ async function renderToHTMLOrFlightImpl(
     req.headers[NEXT_ROUTER_PREFETCH_HEADER.toLowerCase()] !== undefined
 
   /**
-   * Router state provided from the client-side router. Used to handle rendering from the common layout down.
+   * Router state provided from the client-side router. Used to handle rendering
+   * from the common layout down. This value will be undefined if the request
+   * is not a client-side navigation request or if the request is a prefetch
+   * request (except when it's a prefetch request for an interception route
+   * which is always dynamic).
    */
-  let providedFlightRouterState =
-    isRSCRequest && (!isPrefetchRSCRequest || !renderOpts.experimental.ppr)
-      ? parseAndValidateFlightRouterState(
-          req.headers[NEXT_ROUTER_STATE_TREE.toLowerCase()]
-        )
-      : undefined
+  const shouldProvideFlightRouterState =
+    isRSCRequest &&
+    (!isPrefetchRSCRequest ||
+      !renderOpts.experimental.ppr ||
+      // Interception routes currently depend on the flight router state to
+      // extract dynamic params.
+      isInterceptionRouteAppPath(pagePath))
+
+  let providedFlightRouterState = shouldProvideFlightRouterState
+    ? parseAndValidateFlightRouterState(
+        req.headers[NEXT_ROUTER_STATE_TREE.toLowerCase()]
+      )
+    : undefined
 
   /**
    * The metadata items array created in next-app-loader with all relevant information
@@ -732,13 +757,6 @@ async function renderToHTMLOrFlightImpl(
   } else {
     requestId = require('next/dist/compiled/nanoid').nanoid()
   }
-
-  // During static generation we need to call the static generation bailout when reading searchParams
-  const providedSearchParams = isStaticGeneration
-    ? createSearchParamsBailoutProxy()
-    : query
-
-  const searchParamsProps = { searchParams: providedSearchParams }
 
   /**
    * Dynamic parameters. E.g. when you visit `/dashboard/vercel` which is rendered by `/dashboard/[slug]` the value will be {"slug": "vercel"}.
@@ -755,9 +773,7 @@ async function renderToHTMLOrFlightImpl(
     getDynamicParamFromSegment,
     query,
     isPrefetch: isPrefetchRSCRequest,
-    providedSearchParams,
     requestTimestamp,
-    searchParamsProps,
     appUsingSizeAdjustment,
     providedFlightRouterState,
     requestId,
@@ -981,7 +997,7 @@ async function renderToHTMLOrFlightImpl(
         }
 
         return { stream }
-      } catch (err) {
+      } catch (err: any) {
         if (
           isStaticGenBailoutError(err) ||
           (typeof err === 'object' &&
@@ -1009,8 +1025,9 @@ async function renderToHTMLOrFlightImpl(
           console.log()
 
           if (renderOpts.experimental.missingSuspenseWithCSRBailout) {
+            const stack = getStackWithoutErrorMessage(err)
             error(
-              `${err.reason} should be wrapped in a suspense boundary at page "${pagePath}". Read more: https://nextjs.org/docs/messages/missing-suspense-with-csr-bailout`
+              `${err.reason} should be wrapped in a suspense boundary at page "${pagePath}". Read more: https://nextjs.org/docs/messages/missing-suspense-with-csr-bailout\n${stack}`
             )
 
             throw err
@@ -1220,16 +1237,19 @@ async function renderToHTMLOrFlightImpl(
   // It got here, which means it did not reject, so clear the timeout to avoid
   // it from rejecting again (which is a no-op anyways).
   clearTimeout(timeout)
+  const buildFailingError =
+    digestErrorsMap.size > 0 ? digestErrorsMap.values().next().value : null
 
   // If PPR is enabled and the postpone was triggered but lacks the postponed
-  // state information then we should error out unless the client side rendering
-  // bailout error was also emitted which indicates that part of the stream was
-  // not rendered.
+  // state information then we should error out unless the error was a
+  // navigation signal error or a client-side rendering bailout error.
   if (
-    renderOpts.experimental.ppr &&
-    staticGenerationStore.postponeWasTriggered &&
+    staticGenerationStore.prerenderState &&
+    staticGenerationStore.prerenderState.hasDynamic &&
     !metadata.postponed &&
-    (!response.err || !isBailoutToCSRError(response.err))
+    (!response.err ||
+      (!isBailoutToCSRError(response.err) &&
+        !isNavigationSignalError(response.err)))
   ) {
     // a call to postpone was made but was caught and not detected by Next.js. We should fail the build immediately
     // as we won't be able to generate the static part
@@ -1241,12 +1261,12 @@ async function renderToHTMLOrFlightImpl(
         `by your own try/catch. Learn more: https://nextjs.org/docs/messages/ppr-caught-error`
     )
 
-    if (capturedErrors.length > 0) {
+    if (digestErrorsMap.size > 0) {
       warn(
         'The following error was thrown during build, and may help identify the source of the issue:'
       )
 
-      error(capturedErrors[0])
+      error(buildFailingError)
     }
 
     throw new MissingPostponeDataError(
@@ -1262,8 +1282,8 @@ async function renderToHTMLOrFlightImpl(
 
   // If we encountered any unexpected errors during build we fail the
   // prerendering phase and the build.
-  if (capturedErrors.length > 0) {
-    throw capturedErrors[0]
+  if (buildFailingError) {
+    throw buildFailingError
   }
 
   // Wait for and collect the flight payload data if we don't have it
