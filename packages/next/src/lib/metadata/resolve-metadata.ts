@@ -560,6 +560,25 @@ function inheritFromMetadata(
   }
 }
 
+function inheritFromMetadataOpenGrapth(
+  metadata: ResolvedMetadata,
+  twitterTarget: (WithTitle & WithDescription) | null,
+  openGraphTarget: (WithTitle & WithDescription) | null
+) {
+  if (twitterTarget && openGraphTarget) {
+    if (!hasTitle(twitterTarget) && hasTitle(openGraphTarget)) {
+      twitterTarget.title = openGraphTarget.title
+    } else if (!hasTitle(twitterTarget) && !hasTitle(openGraphTarget)) {
+      twitterTarget.title = metadata.title
+    }
+    if (!twitterTarget.description && openGraphTarget.description) {
+      twitterTarget.description = openGraphTarget.description
+    } else if (!twitterTarget.description && metadata.description) {
+      twitterTarget.description = metadata.description
+    }
+  }
+}
+
 const commonOgKeys = ['title', 'description', 'images'] as const
 function postProcessMetadata(
   metadata: ResolvedMetadata,
@@ -570,7 +589,7 @@ function postProcessMetadata(
   // If there's no title and description configured in openGraph or twitter,
   // use the title and description from metadata.
   inheritFromMetadata(metadata, openGraph)
-  inheritFromMetadata(metadata, twitter)
+  inheritFromMetadataOpenGrapth(metadata, twitter, openGraph)
 
   if (openGraph) {
     // If there's openGraph information but not configured in twitter,
